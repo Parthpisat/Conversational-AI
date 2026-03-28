@@ -1,23 +1,7 @@
-"""
-database.py — DuckDB-based data layer for the Instacart BI Agent.
-
-Design decisions:
-- DuckDB is used instead of pandas for query execution. It handles the
-  32M-row order_products__prior table via columnar storage without loading
-  everything into RAM.
-- CSVs are registered as DuckDB views so queries run directly on the files
-  (lazy loading). For repeated queries, they are materialized as tables.
-- order_products__prior and order_products__train are unioned into a single
-  `order_products_all` view so analysts don't need to think about eval_set.
-- NaN in days_since_prior_order (first orders) is preserved as SQL NULL.
-"""
-
 import os
 import time
 import logging
-import json
 from pathlib import Path
-from typing import Optional
 
 import duckdb
 import pandas as pd
@@ -25,12 +9,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Adjust this path to wherever your CSVs live
-# Get the absolute path to the directory containing this file (backend/)
-BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Resolve DATA_DIR relative to the project root
-DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
+# Resolve DATA_DIR relative to this file, not cwd.
+# database.py lives in .../backend/ so parent is the project root
+# and data/ is its sibling folder.
+_THIS_DIR = Path(__file__).parent
+_DEFAULT_DATA = _THIS_DIR.parent / "data"
+DATA_DIR = Path(os.getenv("DATA_DIR", str(_DEFAULT_DATA)))
 
 # Table definitions: logical name → CSV filename
 CSV_FILES = {
@@ -42,138 +26,194 @@ CSV_FILES = {
     "departments": "departments.csv",
 }
 
-# Column schemas for the system prompt (used by NL→SQL module)
+# Explicit pandas dtypes per table.
+# Using "Int64" (capital I) for nullable integers — preserves NaN without
+# converting the column to float, which would corrupt join keys.
+# days_since_prior_order is intentionally left out so pandas keeps it as
+# float64, which naturally represents NaN for first orders.
+DTYPE_MAP = {
+    "orders": {
+        "order_id":            "Int64",
+        "user_id":             "Int64",
+        "eval_set":            "str",
+        "order_number":        "Int64",
+        "order_dow":           "Int64",
+        "order_hour_of_day":   "Int64",
+    },
+    "order_products_prior": {
+        "order_id":          "Int64",
+        "product_id":        "Int64",
+        "add_to_cart_order": "Int64",
+        "reordered":         "Int64",
+    },
+    "order_products_train": {
+        "order_id":          "Int64",
+        "product_id":        "Int64",
+        "add_to_cart_order": "Int64",
+        "reordered":         "Int64",
+    },
+    "products": {
+        "product_id":    "Int64",
+        "product_name":  "str",
+        "aisle_id":      "Int64",
+        "department_id": "Int64",
+    },
+    "aisles": {
+        "aisle_id": "Int64",
+        "aisle":    "str",
+    },
+    "departments": {
+        "department_id": "Int64",
+        "department":    "str",
+    },
+}
+
+# Column schemas for the system prompt (used by NL->SQL module)
 SCHEMA_INFO = {
     "orders": {
         "description": "Core order table (~3.4M rows)",
         "columns": {
-            "order_id": "INTEGER PRIMARY KEY",
-            "user_id": "INTEGER",
-            "eval_set": "VARCHAR — 'prior' or 'train' or 'test'",
-            "order_number": "INTEGER — nth order for this user (starts at 1)",
-            "order_dow": "INTEGER — day of week (0=Saturday, 1=Sunday, ...)",
-            "order_hour_of_day": "INTEGER — hour 0–23",
+            "order_id":               "INTEGER PRIMARY KEY",
+            "user_id":                "INTEGER",
+            "eval_set":               "VARCHAR — 'prior' or 'train' or 'test'",
+            "order_number":           "INTEGER — nth order for this user (starts at 1)",
+            "order_dow":              "INTEGER — day of week (0=Saturday, 1=Sunday, ...)",
+            "order_hour_of_day":      "INTEGER — hour 0-23",
             "days_since_prior_order": "FLOAT — NULL for a user's first order",
         },
     },
     "order_products_prior": {
         "description": "Products in prior orders (~32M rows)",
         "columns": {
-            "order_id": "INTEGER — FK → orders.order_id",
-            "product_id": "INTEGER — FK → products.product_id",
+            "order_id":          "INTEGER — FK -> orders.order_id",
+            "product_id":        "INTEGER — FK -> products.product_id",
             "add_to_cart_order": "INTEGER — position added to cart",
-            "reordered": "INTEGER — 1 if reordered, 0 if first time",
+            "reordered":         "INTEGER — 1 if reordered, 0 if first time",
         },
     },
     "order_products_train": {
         "description": "Products in train orders (~1.4M rows, same schema as prior)",
         "columns": {
-            "order_id": "INTEGER — FK → orders.order_id",
-            "product_id": "INTEGER — FK → products.product_id",
+            "order_id":          "INTEGER — FK -> orders.order_id",
+            "product_id":        "INTEGER — FK -> products.product_id",
             "add_to_cart_order": "INTEGER",
-            "reordered": "INTEGER",
+            "reordered":         "INTEGER",
         },
     },
     "products": {
         "description": "Product catalog (~50K products)",
         "columns": {
-            "product_id": "INTEGER PRIMARY KEY",
-            "product_name": "VARCHAR",
-            "aisle_id": "INTEGER — FK → aisles.aisle_id",
-            "department_id": "INTEGER — FK → departments.department_id",
+            "product_id":    "INTEGER PRIMARY KEY",
+            "product_name":  "VARCHAR",
+            "aisle_id":      "INTEGER — FK -> aisles.aisle_id",
+            "department_id": "INTEGER — FK -> departments.department_id",
         },
     },
     "aisles": {
         "description": "Aisle lookup (134 aisles)",
         "columns": {
             "aisle_id": "INTEGER PRIMARY KEY",
-            "aisle": "VARCHAR — aisle name",
+            "aisle":    "VARCHAR — aisle name",
         },
     },
     "departments": {
         "description": "Department lookup (21 departments)",
         "columns": {
             "department_id": "INTEGER PRIMARY KEY",
-            "department": "VARCHAR — department name",
+            "department":    "VARCHAR — department name",
         },
     },
     "order_products_all": {
         "description": "UNION of prior + train order products (virtual view, ~33.4M rows). Use this for full coverage.",
         "columns": {
-            "order_id": "INTEGER",
-            "product_id": "INTEGER",
+            "order_id":          "INTEGER",
+            "product_id":        "INTEGER",
             "add_to_cart_order": "INTEGER",
-            "reordered": "INTEGER",
-            "source": "VARCHAR — 'prior' or 'train'",
+            "reordered":         "INTEGER",
+            "source":            "VARCHAR — 'prior' or 'train'",
         },
     },
 }
 
 RELATIONSHIPS = [
-    "orders.order_id → order_products_prior.order_id (1:many)",
-    "orders.order_id → order_products_train.order_id (1:many)",
+    "orders.order_id -> order_products_prior.order_id (1:many)",
+    "orders.order_id -> order_products_train.order_id (1:many)",
     "order_products_all is a UNION VIEW of prior + train",
-    "order_products_prior.product_id → products.product_id",
-    "order_products_train.product_id → products.product_id",
-    "products.aisle_id → aisles.aisle_id",
-    "products.department_id → departments.department_id",
+    "order_products_prior.product_id -> products.product_id",
+    "order_products_train.product_id -> products.product_id",
+    "products.aisle_id -> aisles.aisle_id",
+    "products.department_id -> departments.department_id",
 ]
 
 
 class Database:
-    """Singleton DuckDB connection with lazy CSV loading."""
+    """Singleton DuckDB connection with CSV loading via pandas."""
 
     def __init__(self):
-        # In-memory DuckDB — fast, no disk I/O for intermediate results
         self.conn = duckdb.connect(database=":memory:")
         self._loaded = False
         self._load_errors: list[str] = []
 
-    # ------------------------------------------------------------------
-    # Initialization
-    # ------------------------------------------------------------------
-
     def load_data(self) -> dict:
         """
-        Register all CSVs as DuckDB views, then materialize the small
-        lookup tables (aisles, departments, products) as real tables for
-        speed. The two large order_products files stay as views (lazy).
+        Load all 6 CSVs into DuckDB as materialized tables.
+
+        Strategy:
+        - pandas reads each CSV with explicit dtypes (avoids read_csv_auto
+          parameter syntax which breaks on older DuckDB versions).
+        - Each DataFrame is registered then immediately materialized as a
+          real DuckDB table so all subsequent SQL runs at DuckDB speed.
+        - order_products_all is created as a VIEW unioning prior + train.
+        - Errors are logged but never crash the server.
         """
         if self._loaded:
             return self.status()
 
-        logger.info(f"Loading data from {DATA_DIR}")
+        data_dir = DATA_DIR.resolve()
+        logger.info(f"Loading CSVs from: {data_dir}")
+
+        if not data_dir.exists():
+            msg = (
+                f"DATA_DIR not found: {data_dir} | "
+                f"Set DATA_DIR env var or place CSVs in {_DEFAULT_DATA}"
+            )
+            logger.error(msg)
+            self._load_errors.append(msg)
+            self._loaded = True
+            return {"loaded": False, "errors": self._load_errors}
+
         start = time.time()
         results = {}
 
         for table_name, filename in CSV_FILES.items():
-            path = DATA_DIR / filename
+            path = data_dir / filename
+
             if not path.exists():
-                msg = f"File not found: {path}"
-                logger.warning(msg)
+                msg = f"CSV not found: {path}"
+                logger.error(msg)
                 self._load_errors.append(msg)
                 results[table_name] = {"status": "missing", "path": str(path)}
                 continue
 
             try:
-                # Register as a DuckDB view — reads are lazy/columnar
-                self.conn.execute(f"""
-                    CREATE OR REPLACE VIEW {table_name}
-                    AS SELECT * FROM read_csv_auto('{path}', header=true, nullstr='')
-                """)
+                logger.info(f"  Reading {filename} ...")
+                dtypes = DTYPE_MAP.get(table_name, {})
+                df = pd.read_csv(path, dtype=dtypes, low_memory=False)
+                row_count = len(df)
 
-                # Materialize small tables for join performance
-                if table_name in ("aisles", "departments", "products"):
-                    self.conn.execute(f"""
-                        CREATE OR REPLACE TABLE {table_name}_mat AS
-                        SELECT * FROM {table_name}
-                    """)
-                    self.conn.execute(f"DROP VIEW {table_name}")
-                    self.conn.execute(f"ALTER TABLE {table_name}_mat RENAME TO {table_name}")
+                if row_count == 0:
+                    msg = f"{table_name} loaded 0 rows — check {path}"
+                    logger.warning(msg)
+                    self._load_errors.append(msg)
 
-                row_count = self.conn.execute(
-                    f"SELECT COUNT(*) FROM {table_name}"
-                ).fetchone()[0]
+                # Register the DataFrame, materialise as DuckDB table, unregister.
+                # This works on ALL DuckDB versions — no read_csv_auto quirks.
+                tmp_name = f"_tmp_{table_name}"
+                self.conn.register(tmp_name, df)
+                self.conn.execute(
+                    f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM {tmp_name}"
+                )
+                self.conn.unregister(tmp_name)
 
                 results[table_name] = {"status": "loaded", "rows": row_count}
                 logger.info(f"  ✓ {table_name}: {row_count:,} rows")
@@ -184,77 +224,89 @@ class Database:
                 self._load_errors.append(msg)
                 results[table_name] = {"status": "error", "error": str(e)}
 
-        # Create the unified order_products_all view
-        try:
-            self.conn.execute("""
-                CREATE OR REPLACE VIEW order_products_all AS
-                SELECT order_id, product_id, add_to_cart_order, reordered,
-                       'prior' AS source
-                FROM order_products_prior
-                UNION ALL
-                SELECT order_id, product_id, add_to_cart_order, reordered,
-                       'train' AS source
-                FROM order_products_train
-            """)
-            results["order_products_all"] = {"status": "view_created"}
-            logger.info("  ✓ order_products_all view created (prior ∪ train)")
-        except Exception as e:
-            logger.warning(f"Could not create union view: {e}")
+        # Unified view: prior UNION ALL train
+        prior_ok = results.get("order_products_prior", {}).get("status") == "loaded"
+        train_ok = results.get("order_products_train", {}).get("status") == "loaded"
+
+        if prior_ok and train_ok:
+            try:
+                self.conn.execute("""
+                    CREATE OR REPLACE VIEW order_products_all AS
+                    SELECT order_id, product_id, add_to_cart_order, reordered,
+                           'prior' AS source
+                    FROM order_products_prior
+                    UNION ALL
+                    SELECT order_id, product_id, add_to_cart_order, reordered,
+                           'train' AS source
+                    FROM order_products_train
+                """)
+                union_count = self.conn.execute(
+                    "SELECT COUNT(*) FROM order_products_all"
+                ).fetchone()[0]
+                results["order_products_all"] = {
+                    "status": "view_created", "rows": union_count
+                }
+                logger.info(f"  ✓ order_products_all (prior + train): {union_count:,} rows")
+            except Exception as e:
+                msg = f"Could not create order_products_all view: {e}"
+                logger.error(msg)
+                self._load_errors.append(msg)
+        else:
+            missing = [t for t, ok in [
+                ("order_products_prior", prior_ok),
+                ("order_products_train", train_ok),
+            ] if not ok]
+            logger.warning(f"Skipping order_products_all — missing tables: {missing}")
 
         elapsed = time.time() - start
-        logger.info(f"Data loading complete in {elapsed:.1f}s")
+        logger.info(
+            f"Load complete in {elapsed:.1f}s | errors: {len(self._load_errors)}"
+        )
         self._loaded = True
         return results
-
-    # ------------------------------------------------------------------
-    # Query execution
-    # ------------------------------------------------------------------
 
     def execute_query(
         self, sql: str, max_rows: int = 500
     ) -> tuple[list[dict], list[str], int]:
         """
         Execute SQL and return (rows, columns, total_row_count).
-        Caps result at max_rows for the API response; full count is
-        always returned so the UI can show "Showing N of M rows".
+        Caps result at max_rows for the API; full count always returned.
+        All non-JSON-serializable numpy types are sanitized.
         """
         if not self._loaded:
             raise RuntimeError("Database not loaded. Call load_data() first.")
 
-        # Run the query
         result = self.conn.execute(sql)
         columns = [desc[0] for desc in result.description]
         all_rows = result.fetchall()
         total = len(all_rows)
 
-        # Convert to list of dicts, truncate for response
         rows = [dict(zip(columns, row)) for row in all_rows[:max_rows]]
 
-        # Sanitize: convert non-JSON-serializable types
         for row in rows:
             for k, v in row.items():
-                if isinstance(v, float) and (v != v):  # NaN check
+                if v is None:
+                    pass
+                elif isinstance(v, float) and v != v:      # NaN check
                     row[k] = None
-                elif isinstance(v, (np.integer, np.floating)):  # numpy scalar
-                    row[k] = v.item()
-                elif isinstance(v, np.ndarray):  # numpy array
-                    row[k] = v.tolist()
-                elif isinstance(v, (np.bool_)):
+                elif isinstance(v, np.integer):
+                    row[k] = int(v)
+                elif isinstance(v, np.floating):
+                    row[k] = None if np.isnan(v) else float(v)
+                elif isinstance(v, np.bool_):
                     row[k] = bool(v)
+                elif isinstance(v, np.ndarray):
+                    row[k] = v.tolist()
                 elif hasattr(v, "item"):
                     row[k] = v.item()
 
         return rows, columns, total
 
     def execute_query_df(self, sql: str) -> pd.DataFrame:
-        """Execute SQL and return a pandas DataFrame (for chart building)."""
+        """Execute SQL and return a pandas DataFrame (used by chart builder)."""
         if not self._loaded:
             raise RuntimeError("Database not loaded.")
         return self.conn.execute(sql).df()
-
-    # ------------------------------------------------------------------
-    # Introspection
-    # ------------------------------------------------------------------
 
     def status(self) -> dict:
         if not self._loaded:
@@ -283,10 +335,7 @@ class Database:
         }
 
     def get_schema_for_prompt(self) -> str:
-        """
-        Returns a compact schema string to inject into the Claude system
-        prompt so it can generate accurate SQL.
-        """
+        """Compact schema string injected into the Claude system prompt."""
         lines = ["=== DATABASE SCHEMA (DuckDB SQL dialect) ===\n"]
 
         for table, info in SCHEMA_INFO.items():
@@ -298,7 +347,7 @@ class Database:
 
         lines.append("=== RELATIONSHIPS ===")
         for rel in RELATIONSHIPS:
-            lines.append(f"  • {rel}")
+            lines.append(f"  * {rel}")
 
         lines.append("""
 === IMPORTANT NOTES ===
@@ -314,10 +363,7 @@ class Database:
         return "\n".join(lines)
 
     def get_sample_rows_for_prompt(self) -> str:
-        """
-        Returns a formatted string of sample rows for key tables to give the model
-        a concrete sense of the data.
-        """
+        """Sample rows for key tables — gives Claude concrete data intuition."""
         lines = ["=== SAMPLE ROWS ==="]
         for table in ["orders", "products", "order_products_all"]:
             try:
