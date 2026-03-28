@@ -1,0 +1,15 @@
+# Environment variables
+.env
+
+# Data files
+data/*
+
+# Python virtual environment
+.venv/
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Node.js dependencies
+/frontend/node_modules/
