@@ -1,13 +1,3 @@
-"""
-chart_builder.py — Converts DuckDB query results into Plotly figure JSON.
-
-Supports: bar, line, pie, scatter, histogram, table (returns None for table
-type — the frontend renders raw data as a table in that case).
-
-The frontend receives the Plotly figure as a JSON dict and renders it with
-the Plotly.js library (no server-side rendering needed).
-"""
-
 import logging
 from typing import Optional, Tuple, Any
 

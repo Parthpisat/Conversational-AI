@@ -7,6 +7,12 @@ import duckdb
 import pandas as pd
 import numpy as np
 
+# Handle both relative and absolute imports
+try:
+    from .csv_schema_analyzer import CSVSchemaAnalyzer
+except ImportError:
+    from csv_schema_analyzer import CSVSchemaAnalyzer
+
 logger = logging.getLogger(__name__)
 
 # Resolve DATA_DIR relative to this file, not cwd.
@@ -153,6 +159,8 @@ class Database:
         self.conn = duckdb.connect(database=":memory:")
         self._loaded = False
         self._load_errors: list[str] = []
+        # Initialize the schema analyzer
+        self.schema_analyzer = CSVSchemaAnalyzer(data_dir=str(DATA_DIR))
 
     def load_data(self) -> dict:
         """
@@ -263,6 +271,12 @@ class Database:
             f"Load complete in {elapsed:.1f}s | errors: {len(self._load_errors)}"
         )
         self._loaded = True
+        
+        # Analyze CSVs now that data is loaded
+        logger.info("Analyzing CSV schemas...")
+        self.schema_analyzer.analyze_all_csvs()
+        logger.info("✅ Schema analysis complete")
+        
         return results
 
     def execute_query(
@@ -335,7 +349,54 @@ class Database:
         }
 
     def get_schema_for_prompt(self) -> str:
-        """Compact schema string injected into the Claude system prompt."""
+        """
+        Schema string injected into the system prompt.
+        Uses CSVSchemaAnalyzer for dynamic schema extraction with fallback to SCHEMA_INFO.
+        """
+        # Try to use the analyzer's schema if available
+        if self.schema_analyzer.schema:
+            return self._generate_schema_from_analyzer()
+        
+        # Fallback to hardcoded schema if analyzer hasn't run yet
+        return self._generate_schema_from_info()
+    
+    def _generate_schema_from_analyzer(self) -> str:
+        """Generate schema text using CSVSchemaAnalyzer data."""
+        lines = ["=== DATABASE SCHEMA (DuckDB SQL dialect) ===\n"]
+        
+        for table_name, table_info in self.schema_analyzer.schema.items():
+            lines.append(f"TABLE: {table_name}")
+            lines.append(f"  {table_info['description']}")
+            lines.append(f"  Rows: {table_info['row_count']:,}")
+            
+            for col_name, col_info in table_info['columns'].items():
+                sql_type = col_info.get('sql_type', 'VARCHAR')
+                description = col_info.get('description', '')
+                lines.append(f"  - {col_name}: {sql_type}")
+                if description:
+                    lines.append(f"    {description}")
+                
+                # Add relationships if present
+                if col_info.get('relationships'):
+                    for rel in col_info['relationships']:
+                        lines.append(f"    {rel}")
+            
+            lines.append("")
+        
+        lines.append("""=== IMPORTANT NOTES ===
+- Use order_products_all (the UNION view) for full product coverage unless
+  the question specifically asks about prior/train split.
+- days_since_prior_order is NULL for a user's first order — always use
+  COALESCE or WHERE ... IS NOT NULL when filtering/aggregating this column.
+- order_dow: 0=Saturday, 1=Sunday, 2=Monday, ..., 6=Friday
+- reordered: 1 means the product was reordered, 0 means first time in cart
+- Always add LIMIT clauses — tables can be very large.
+- For reorder rate: AVG(reordered) works because the column is 0/1.
+""")
+        return "\n".join(lines)
+    
+    def _generate_schema_from_info(self) -> str:
+        """Generate schema text from hardcoded SCHEMA_INFO (fallback)."""
         lines = ["=== DATABASE SCHEMA (DuckDB SQL dialect) ===\n"]
 
         for table, info in SCHEMA_INFO.items():
@@ -374,6 +435,21 @@ class Database:
             except Exception as e:
                 logger.warning(f"Could not get sample rows for {table}: {e}")
         return "\n".join(lines)
+    
+    def get_comprehensive_schema_text(self) -> str:
+        """
+        Get comprehensive schema details from CSVSchemaAnalyzer.
+        Useful for debugging and understanding detailed table metadata.
+        """
+        if self.schema_analyzer.schema:
+            return self.schema_analyzer.generate_comprehensive_schema_text()
+        return "No schema analyzed yet. Call load_data() first."
+    
+    def get_detailed_table_info(self, table_name: str) -> dict:
+        """Get detailed information about a specific table from the analyzer."""
+        if table_name in self.schema_analyzer.schema:
+            return self.schema_analyzer.schema[table_name]
+        return {}
 
 
 # Global singleton instance

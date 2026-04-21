@@ -1,13 +1,16 @@
 import json
 import logging
 import os
+import time
 from typing import Optional
+from dotenv import load_dotenv
+from ollama_client import ollama_client
 
-import google.genai as genai
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODEL = "gemini-2.5-flash"
+OLLAMA_MODEL = "llama3.2:latest"
 
 # ---------------------------------------------------------------------------
 # Few-shot examples injected into the system prompt
@@ -156,52 +159,150 @@ Respond with the corrected JSON object only (no markdown, no explanation outside
 
 class NLToSQL:
     def __init__(self, schema_text: str, sample_rows_text: str):
-        self.client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
         self.system_prompt = build_system_prompt(schema_text, sample_rows_text)
 
-    def _call_gemini(self, messages: list[dict]) -> dict:
+    def _call_ollama(self, messages: list[dict]) -> dict:
         """
-        Call the Gemini API and parse the JSON response.
+        Call the Ollama model and parse the JSON response.
         Returns dict with keys: sql, chart_type, explanation
         """
-        # Build conversation history using dictionaries
-        full_conversation = [{"text": self.system_prompt}]
+        # Prepare messages for Ollama - include system prompt and conversation
+        ollama_messages = [
+            {"role": "system", "content": self.system_prompt}
+        ]
+        
+        # Add conversation history
         for msg in messages:
-            # Handle both dictionary and object formats for messages
-            content = msg.get("content") if isinstance(msg, dict) else msg.content
-            full_conversation.append({"text": content})
+            role = msg.get("role") if isinstance(msg, dict) else "user"
+            content = msg.get("content") if isinstance(msg, dict) else str(msg)
+            ollama_messages.append({"role": role, "content": content})
 
-        response = self.client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=full_conversation,
-            config={
-                "temperature": 0.0,
-                "response_mime_type": "application/json",
-            },
-        )
+        # Retry logic with exponential backoff for temporary errors
+        max_retries = 3
+        base_delay = 2  # seconds
+        
+        for attempt in range(max_retries):
+            try:
+                response = ollama_client.chat(
+                    ollama_messages,
+                    temperature=0.1,  # Low temperature for deterministic SQL
+                    top_p=0.9
+                )
+                break  # Success, exit retry loop
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logger.error(f"Ollama API failed after {max_retries} attempts: {e}")
+                    raise
+                else:
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.warning(f"Ollama API temporary error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {delay}s...")
+                    time.sleep(delay)
+                    continue
 
-        raw = response.text.strip()
-
-        # Strip markdown fences if Gemini adds them despite instructions
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
+        raw_response = response.get("response", "")
+        
+        # Clean the response - SQLCoder might return HTML-like tags or special tokens
+        cleaned_response = raw_response.strip()
+        
+        # Remove common LLM artifacts and special tokens
+        cleaned_response = cleaned_response.replace("<s>", "").replace("</s>", "")
+        cleaned_response = cleaned_response.replace("[INST]", "").replace("[/INST]", "")
+        cleaned_response = cleaned_response.replace("<|im_start|>", "").replace("<|im_end|>", "")
+        
+        # SQLCoder often returns complete JSON with sql, chart_type, explanation
         try:
-            result = json.loads(raw)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Gemini response as JSON: {raw}")
-            raise ValueError(f"Gemini returned non-JSON response: {e}")
+            # First, try to parse the entire response as JSON
+            try:
+                result = json.loads(cleaned_response)
+                # Validate that we have the required SQL field
+                if "sql" not in result:
+                    raise json.JSONDecodeError("Missing sql field", "", 0)
+            except json.JSONDecodeError:
+                # If direct JSON parsing fails, try to extract JSON from markdown
+                if "```json" in cleaned_response:
+                    json_part = cleaned_response.split("```json")[1].split("```")[0].strip()
+                    result = json.loads(json_part)
+                elif "```" in cleaned_response:
+                    # Might be just SQL code without JSON wrapper
+                    sql_code = cleaned_response.split("```")[1].strip()
+                    if sql_code.lower().startswith("sql"):
+                        sql_code = sql_code[3:].strip()
+                    result = {"sql": sql_code, "chart_type": "table", "explanation": ""}
+                else:
+                    # Assume it's raw SQL - clean any remaining artifacts
+                    sql_code = cleaned_response
+                    # Remove any leading/trailing non-SQL content
+                    if "SELECT" in sql_code.upper():
+                        # Extract from first SELECT onwards
+                        select_pos = sql_code.upper().find("SELECT")
+                        sql_code = sql_code[select_pos:]
+                    elif "WITH" in sql_code.upper():
+                        # Extract from first WITH onwards for CTEs
+                        with_pos = sql_code.upper().find("WITH")
+                        sql_code = sql_code[with_pos:]
+                    
+                    result = {"sql": sql_code.strip(), "chart_type": "table", "explanation": ""}
+        
+        except (json.JSONDecodeError, IndexError):
+            # If JSON parsing fails, treat the cleaned response as SQL
+            logger.warning(f"Failed to parse Ollama response as JSON, treating as raw SQL: {cleaned_response}")
+            # Extract just the SQL part if possible
+            sql_code = cleaned_response
+            if "SELECT" in sql_code.upper():
+                select_pos = sql_code.upper().find("SELECT")
+                sql_code = sql_code[select_pos:]
+            result = {"sql": sql_code.strip(), "chart_type": "table", "explanation": ""}
 
         # Validate required fields
         if "sql" not in result:
-            raise ValueError(f"Gemini response missing 'sql' field: {result}")
+            raise ValueError(f"Ollama response missing 'sql' field: {result}")
 
         result.setdefault("chart_type", "table")
         result.setdefault("explanation", "")
+        
+        # Clean the SQL to fix any formatting issues from the model
+        if "sql" in result:
+            result["sql"] = self._clean_sql(result["sql"])
+        
         return result
+    
+    def _clean_sql(self, sql_code: str) -> str:
+        """
+        Clean malformed SQL from the model response.
+        Removes trailing commas, extra quotes, and other common issues.
+        """
+        # Remove trailing commas that cause syntax errors
+        sql_code = sql_code.rstrip(",")
+        sql_code = sql_code.rstrip(", ")
+        
+        # Remove any trailing semicolons followed by garbage
+        if ";" in sql_code:
+            # Take only the part before the first semicolon
+            sql_code = sql_code.split(";")[0]
+        
+        # Remove any extra quotes or malformed endings
+        sql_code = sql_code.rstrip('"')
+        sql_code = sql_code.rstrip("'")
+        sql_code = sql_code.rstrip()
+        
+        # Fix common pattern: "... LIMIT 10", " -> remove the trailing quote and comma
+        if sql_code.endswith('",'):
+            sql_code = sql_code[:-2]
+        elif sql_code.endswith('"'):
+            sql_code = sql_code[:-1]
+        
+        # Remove any non-SQL content at the end
+        lines = sql_code.split('\n')
+        cleaned_lines = []
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('--') and not line.startswith('#'):
+                cleaned_lines.append(line)
+        
+        sql_code = ' '.join(cleaned_lines)
+        
+        # Final trim
+        return sql_code.strip()
 
     def translate(
         self,
@@ -219,7 +320,7 @@ class NLToSQL:
         messages.append({"role": "user", "content": question})
 
         logger.info(f"Translating: {question!r}")
-        result = self._call_gemini(messages)
+        result = self._call_ollama(messages)
         logger.info(f"Generated SQL: {result['sql'][:200]}...")
         return result
 
@@ -240,4 +341,4 @@ class NLToSQL:
         messages = list(conversation_history or [])
         messages.append({"role": "user", "content": retry_content})
 
-        return self._call_gemini(messages)
+        return self._call_ollama(messages)
