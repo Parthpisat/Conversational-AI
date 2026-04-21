@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { BarChart, Bar, LineChart, Line, PieChart, Pie, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
+} from 'recharts';
 
 const API = "http://localhost:8000";
 
@@ -12,73 +15,116 @@ const SUGGESTIONS = [
   "Average days between orders per user",
 ];
 
+const COLORS = [
+  "#6366f1", "#8b5cf6", "#06b6d4", "#10b981",
+  "#f59e0b", "#ef4444", "#ec4899", "#14b8a6",
+];
+
 // ── Recharts chart renderer ──
 function RechartsChart({ data, config, type }) {
   if (!data || !config) return null;
-
-  const randomColor = () => `#${Math.floor(Math.random()*16777215).toString(16).padStart(6, '0')}`;
 
   const renderChart = () => {
     switch (type) {
       case 'bar':
         return (
-          <BarChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={config.x} />
-            <YAxis />
-            <Tooltip />
-            <Legend />
-            {config.y.map(key => <Bar key={key} dataKey={key} fill={randomColor()} />)}
+          <BarChart data={data} margin={{ top: 20, right: 30, left: 40, bottom: 60 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#2e2e3e" />
+            <XAxis
+              dataKey={config.x}
+              stroke="#8888aa"
+              fontSize={12}
+              angle={-45}
+              textAnchor="end"
+              interval={0}
+            />
+            <YAxis stroke="#8888aa" fontSize={12} />
+            <Tooltip
+              contentStyle={{ background: "#1a1a24", border: "1px solid #2e2e3e", borderRadius: 8 }}
+              itemStyle={{ color: "#e8e8f0" }}
+            />
+            <Legend wrapperStyle={{ paddingTop: 20 }} />
+            {config.y.map((key, i) => (
+              <Bar key={key} dataKey={key} fill={COLORS[i % COLORS.length]} radius={[4, 4, 0, 0]} />
+            ))}
           </BarChart>
         );
       case 'line':
         return (
-          <LineChart data={data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={config.x} />
-            <YAxis />
-            <Tooltip />
-            <Legend />
-            {config.y.map(key => <Line key={key} type="monotone" dataKey={key} stroke={randomColor()} />)}
+          <LineChart data={data} margin={{ top: 20, right: 30, left: 40, bottom: 60 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#2e2e3e" />
+            <XAxis
+              dataKey={config.x}
+              stroke="#8888aa"
+              fontSize={12}
+              angle={-45}
+              textAnchor="end"
+              interval={0}
+            />
+            <YAxis stroke="#8888aa" fontSize={12} />
+            <Tooltip
+              contentStyle={{ background: "#1a1a24", border: "1px solid #2e2e3e", borderRadius: 8 }}
+              itemStyle={{ color: "#e8e8f0" }}
+            />
+            <Legend wrapperStyle={{ paddingTop: 20 }} />
+            {config.y.map((key, i) => (
+              <Line
+                key={key}
+                type="monotone"
+                dataKey={key}
+                stroke={COLORS[i % COLORS.length]}
+                strokeWidth={2}
+                dot={{ r: 4 }}
+                activeDot={{ r: 6 }}
+              />
+            ))}
           </LineChart>
         );
       case 'pie':
         return (
           <PieChart>
-            <Pie data={data} dataKey={config.values} nameKey={config.names} cx="50%" cy="50%" outerRadius={100} label>
-              {data.map((entry, index) => <Cell key={`cell-${index}`} fill={randomColor()} />)}
+            <Pie
+              data={data}
+              dataKey={config.values}
+              nameKey={config.names}
+              cx="50%"
+              cy="50%"
+              outerRadius={120}
+              label={({ name, percent }) => `${name} (${(percent * 100).toFixed(0)}%)`}
+            >
+              {data.map((entry, index) => (
+                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+              ))}
             </Pie>
-            <Tooltip />
+            <Tooltip
+              contentStyle={{ background: "#1a1a24", border: "1px solid #2e2e3e", borderRadius: 8 }}
+            />
             <Legend />
           </PieChart>
         );
       default:
-        return null;
+        return <div className="empty-state">Unsupported chart type: {type}</div>;
     }
   };
 
   return (
-    <ResponsiveContainer width="100%" height={400}>
-      {renderChart()}
-    </ResponsiveContainer>
+    <div style={{ width: "100%", height: "500px" }}>
+      <ResponsiveContainer width="100%" height="100%">
+        {renderChart()}
+      </ResponsiveContainer>
+    </div>
   );
 }
 
 // ── Data table renderer ──
 function DataTable({ rows, columns }) {
-  const [currentPage, setCurrentPage] = useState(1);
-  const rowsPerPage = 10;
-
   if (!rows || rows.length === 0)
     return (
       <div style={{ color: "var(--text-muted)", padding: 16 }}>No data</div>
     );
-
-  const paginatedRows = rows.slice((currentPage - 1) * rowsPerPage, currentPage * rowsPerPage);
-
   return (
-    <div className="table-wrap">
-      <table>
+    <div className="table-container">
+      <table className="data-table">
         <thead>
           <tr>
             {columns.map((c) => (
@@ -87,7 +133,7 @@ function DataTable({ rows, columns }) {
           </tr>
         </thead>
         <tbody>
-          {paginatedRows.map((row, i) => (
+          {rows.map((row, i) => (
             <tr key={i}>
               {columns.map((c) => (
                 <td key={c}>
@@ -106,11 +152,6 @@ function DataTable({ rows, columns }) {
           ))}
         </tbody>
       </table>
-      <div className="pagination">
-        <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1}>Previous</button>
-        <span>Page {currentPage} of {Math.ceil(rows.length / rowsPerPage)}</span>
-        <button onClick={() => setCurrentPage(p => Math.min(Math.ceil(rows.length / rowsPerPage), p + 1))} disabled={currentPage * rowsPerPage >= rows.length}>Next</button>
-      </div>
     </div>
   );
 }
@@ -118,14 +159,11 @@ function DataTable({ rows, columns }) {
 // ── SQL block with copy ──
 function SQLBlock({ sql }) {
   const [copied, setCopied] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const ref = useRef(null);
 
   useEffect(() => {
-    if (!collapsed && ref.current && window.hljs) {
-      window.hljs.highlightElement(ref.current);
-    }
-  }, [sql, collapsed]);
+    if (ref.current && window.hljs) window.hljs.highlightElement(ref.current);
+  }, [sql]);
 
   const copy = () => {
     navigator.clipboard.writeText(sql);
@@ -136,20 +174,16 @@ function SQLBlock({ sql }) {
   return (
     <div className="sql-block">
       <div className="sql-header">
-        <span className="sql-label" onClick={() => setCollapsed(c => !c)} style={{ cursor: 'pointer' }}>
-          Generated SQL {collapsed ? '▶' : '▼'}
-        </span>
+        <span className="sql-label">Generated SQL</span>
         <button className="copy-btn" onClick={copy}>
           {copied ? "✓ Copied" : "Copy"}
         </button>
       </div>
-      {!collapsed && (
-        <pre>
-          <code ref={ref} className="language-sql">
-            {sql}
-          </code>
-        </pre>
-      )}
+      <pre>
+        <code ref={ref} className="language-sql">
+          {sql}
+        </code>
+      </pre>
     </div>
   );
 }
@@ -182,7 +216,7 @@ function SchemaPanel({ schema }) {
 }
 
 // ── Visualization panel ──
-function VizPanel({ result, schema }) {
+function VizPanel({ result, schema, onFollowUp }) {
   const [tab, setTab] = useState("chart");
 
   useEffect(() => {
@@ -213,85 +247,118 @@ function VizPanel({ result, schema }) {
 
   const hasChart = result.chart_json && result.chart_type !== "table";
 
+  const intentBadgeColor = {
+    simple: "#10b981", join: "#6366f1", multistep: "#8b5cf6",
+    temporal: "#f59e0b", correlation: "#06b6d4", retry: "#ef4444",
+  };
+
   return (
     <div className="viz-panel">
       <div className="viz-tabs">
         {hasChart && (
-          <button
-            className={`viz-tab ${tab === "chart" ? "active" : ""}`}
-            onClick={() => setTab("chart")}
-          >
+          <button className={`viz-tab ${tab === "chart" ? "active" : ""}`} onClick={() => setTab("chart")}>
             📈 Chart
           </button>
         )}
-        <button
-          className={`viz-tab ${tab === "table" ? "active" : ""}`}
-          onClick={() => setTab("table")}
-        >
+        <button className={`viz-tab ${tab === "table" ? "active" : ""}`} onClick={() => setTab("table")}>
           📋 Table
         </button>
-        <button
-          className={`viz-tab ${tab === "sql" ? "active" : ""}`}
-          onClick={() => setTab("sql")}
-        >
+        <button className={`viz-tab ${tab === "sql" ? "active" : ""}`} onClick={() => setTab("sql")}>
           🔍 SQL
         </button>
-        <button
-          className={`viz-tab ${tab === "schema" ? "active" : ""}`}
-          onClick={() => setTab("schema")}
-        >
+        <button className={`viz-tab ${tab === "schema" ? "active" : ""}`} onClick={() => setTab("schema")}>
           🗂 Schema
         </button>
+
+        {/* Intent badge */}
+        {result.intent && (
+          <span style={{
+            marginLeft: "auto", alignSelf: "center", marginRight: 16,
+            fontSize: 11, fontWeight: 600, padding: "3px 10px", borderRadius: 20,
+            background: `${intentBadgeColor[result.intent]}22`,
+            color: intentBadgeColor[result.intent],
+            border: `1px solid ${intentBadgeColor[result.intent]}55`,
+            textTransform: "uppercase", letterSpacing: "0.06em",
+          }}>
+            {result.intent}
+          </span>
+        )}
       </div>
 
       <div className="viz-content">
-        {result.error && (
-          <div className="error-banner">⚠️ {result.error}</div>
-        )}
+        {/* Fixed header area */}
+        <div className="viz-header">
+          {result.error && <div className="error-banner">⚠️ {result.error}</div>}
 
-        {result.explanation && tab !== "schema" && (
-          <div className="explanation-box">💡 {result.explanation}</div>
-        )}
+          {/* Insight box (Claude narration) */}
+          {result.insight && tab !== "schema" && (
+            <div className="insight-box">
+              <span style={{ fontSize: 16, marginRight: 8 }}>🔍</span>
+              {result.insight}
+            </div>
+          )}
 
-        {tab === "chart" && hasChart && (
-          <>
-            <div className="info-cards">
-              <div className="info-card">
-                <div className="info-card-label">Rows returned</div>
-                <div className="info-card-value">
-                  {result.row_count?.toLocaleString() ?? "—"}
+          {/* Technical explanation (collapsible) */}
+          {result.explanation && !result.insight && tab !== "schema" && (
+            <div className="explanation-box">💡 {result.explanation}</div>
+          )}
+        </div>
+
+        {/* Scrollable main content */}
+        <div className="viz-scrollable">
+          <div className="tab-content">
+            {tab === "chart" && hasChart && (
+              <>
+                <div className="info-cards">
+                  <div className="info-card">
+                    <div className="info-card-label">Rows returned</div>
+                    <div className="info-card-value">{result.row_count?.toLocaleString() ?? "—"}</div>
+                  </div>
+                  <div className="info-card">
+                    <div className="info-card-label">Chart type</div>
+                    <div className="info-card-value" style={{ textTransform: "capitalize" }}>{result.chart_type}</div>
+                  </div>
                 </div>
-              </div>
-              <div className="info-card">
-                <div className="info-card-label">Chart type</div>
-                <div
-                  className="info-card-value"
-                  style={{ textTransform: "capitalize" }}
-                >
-                  {result.chart_type}
+                <div className="chart-container">
+                  <RechartsChart
+                    data={result.chart_json?.data}
+                    config={result.chart_json?.config}
+                    type={result.chart_type}
+                  />
                 </div>
+              </>
+            )}
+
+            {tab === "table" && (
+              <>
+                <div className="row-count">
+                  Showing {result.table?.length?.toLocaleString()} of{" "}
+                  {result.row_count?.toLocaleString()} rows
+                </div>
+                <DataTable rows={result.table} columns={result.columns} />
+              </>
+            )}
+
+            {tab === "sql" && <SQLBlock sql={result.sql} />}
+            {tab === "schema" && <SchemaPanel schema={schema} />}
+          </div>
+        </div>
+
+        {/* Fixed footer area */}
+        {result.follow_ups?.length > 0 && tab !== "schema" && (
+          <div className="viz-footer">
+            <div className="follow-up-section">
+              <div className="follow-up-label">💬 Follow-up questions</div>
+              <div className="follow-up-chips">
+                {result.follow_ups.map((q) => (
+                  <button key={q} className="follow-up-chip" onClick={() => onFollowUp(q)}>
+                    {q}
+                  </button>
+                ))}
               </div>
             </div>
-            <div className="chart-container">
-              <RechartsChart data={result.chart_json.data} config={result.chart_json.config} type={result.chart_type} />
-            </div>
-
-          </>
+          </div>
         )}
-
-        {tab === "table" && (
-          <>
-            <div className="row-count">
-              Showing {result.table?.length?.toLocaleString()} of{" "}
-              {result.row_count?.toLocaleString()} rows
-            </div>
-            <DataTable rows={result.table} columns={result.columns} />
-          </>
-        )}
-
-        {tab === "sql" && <SQLBlock sql={result.sql} />}
-
-        {tab === "schema" && <SchemaPanel schema={schema} />}
       </div>
     </div>
   );
@@ -305,8 +372,8 @@ export default function App() {
   const [activeResult, setActiveResult] = useState(null);
   const [dbStatus, setDbStatus] = useState("loading");
   const [schema, setSchema] = useState(null);
-  const [showSuggestions, setShowSuggestions] = useState(true);
   const messagesEndRef = useRef(null);
+  const textareaRef = useRef(null);
   const conversationHistoryRef = useRef([]);
 
   useEffect(() => {
@@ -331,6 +398,11 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // Auto-focus the textarea on mount
+  useEffect(() => {
+    textareaRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -342,7 +414,7 @@ export default function App() {
 
       setInput("");
       setLoading(true);
-      setShowSuggestions(false);
+      textareaRef.current?.focus();
 
       const userMsg = { role: "user", content: question, id: Date.now() };
       setMessages((prev) => [...prev, userMsg]);
@@ -355,6 +427,7 @@ export default function App() {
           body: JSON.stringify({
             question,
             conversation_history: conversationHistoryRef.current.slice(-10),
+            generate_insight: true,
           }),
         });
 
@@ -362,7 +435,7 @@ export default function App() {
 
         const assistantMsg = {
           role: "assistant",
-          content: data.explanation || "Query complete.",
+          content: data.insight || data.explanation || "Query complete.",
           id: Date.now() + 1,
           result: data,
         };
@@ -391,7 +464,11 @@ export default function App() {
     [input, loading]
   );
 
-
+  const handleFollowUp = useCallback((question) => {
+    setInput(question);
+    // small delay so user sees the question appear before auto-send
+    setTimeout(() => sendMessage(question), 100);
+  }, [sendMessage]);
 
   const handleKey = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -491,29 +568,17 @@ export default function App() {
             <div ref={messagesEndRef} />
           </div>
 
-          {showSuggestions && (
-            <div className="suggestions">
-              <div className="suggestions-label">Try asking…</div>
-              {SUGGESTIONS.map((s) => (
-                <button
-                  key={s}
-                  className="sugg-chip"
-                  onClick={() => sendMessage(s)}
-                >
-                  {s}
-                </button>
-              ))}
-            </div>
-          )}
-
           <div className="input-area">
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKey}
-              placeholder="Ask a question in plain English…"
+              placeholder="Ask anything about the Instacart data…"
               disabled={loading || dbStatus !== "ok"}
               rows={2}
+              id="query-input"
+              name="query"
             />
             <button
               className="send-btn"
@@ -523,11 +588,75 @@ export default function App() {
               ↑
             </button>
           </div>
+
+          <div className="suggestions">
+            <div className="suggestions-label">Sample questions</div>
+            <div className="suggestions-scroll">
+              {SUGGESTIONS.map((s) => (
+                <button
+                  key={s}
+                  className="sugg-chip"
+                  onClick={() => sendMessage(s)}
+                  disabled={loading || dbStatus !== "ok"}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Viz panel */}
-        <VizPanel result={activeResult} schema={schema} />
+        <VizPanel result={activeResult} schema={schema} onFollowUp={handleFollowUp} />
       </div>
     </>
   );
 }
+//                   <span className="spinner" /> Thinking…
+//                 </div>
+//               </div>
+//             )}
+
+//             <div ref={messagesEndRef} />
+//           </div>
+
+//           {showSuggestions && (
+//             <div className="suggestions">
+//               <div className="suggestions-label">Try asking…</div>
+//               {SUGGESTIONS.map((s) => (
+//                 <button
+//                   key={s}
+//                   className="sugg-chip"
+//                   onClick={() => sendMessage(s)}
+//                 >
+//                   {s}
+//                 </button>
+//               ))}
+//             </div>
+//           )}
+
+//           <div className="input-area">
+//             <textarea
+//               value={input}
+//               onChange={(e) => setInput(e.target.value)}
+//               onKeyDown={handleKey}
+//               placeholder="Ask a question in plain English…"
+//               disabled={loading || dbStatus !== "ok"}
+//               rows={2}
+//             />
+//             <button
+//               className="send-btn"
+//               onClick={() => sendMessage()}
+//               disabled={loading || !input.trim() || dbStatus !== "ok"}
+//             >
+//               ↑
+//             </button>
+//           </div>
+//         </div>
+
+//         {/* Viz panel */}
+//         <VizPanel result={activeResult} schema={schema} />
+//       </div>
+//     </>
+//   );
+// }
