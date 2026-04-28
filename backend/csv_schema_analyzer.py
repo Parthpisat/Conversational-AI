@@ -25,9 +25,11 @@ class CSVSchemaAnalyzer:
             "department_id": "Foreign key referencing the department the product belongs to",
             
             # Aisles table
+            "aisle_id": "Unique identifier for each aisle",
             "aisle": "Name of the aisle (e.g., 'fresh fruits', 'baking ingredients')",
             
-            # Departments table  
+            # Departments table
+            "department_id": "Unique identifier for each department",
             "department": "Name of the department (e.g., 'produce', 'dairy eggs')",
             
             # Orders table
@@ -39,11 +41,13 @@ class CSVSchemaAnalyzer:
             "order_hour_of_day": "Hour of day order was placed (0-23)",
             "days_since_prior_order": "Days since user's previous order (NULL for first order)",
             
-            # Order Products table
+            # Order Products Train table
+            "order_id": "Order identifier (same as in orders table)",
+            "product_id": "Product identifier (same as in products table)",
             "add_to_cart_order": "Sequence number of product added to cart",
             "reordered": "Whether product was reordered (1=reordered, 0=first time)",
             
-            # Users table
+            # Order Products Prior table
             "order_id": "Order identifier (same as in orders table)",
             "product_id": "Product identifier (same as in products table)",
             "add_to_cart_order": "Order in which product was added to cart",
@@ -56,8 +60,8 @@ class CSVSchemaAnalyzer:
             "aisles": "Product categorization - aisles within departments",
             "departments": "Top-level product categorization (produce, dairy, etc.)",
             "orders": "Customer order metadata including timing and sequence",
-            "order_products": "Individual products within each order",
-            "order_products_all": "Combined order products with all metadata"
+            "order_products_prior": "Individual products within each order (prior orders)",
+            "order_products_train": "Individual products within each order (training data)"
         }
         
         # Data type mappings

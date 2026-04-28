@@ -3,6 +3,11 @@ from typing import Optional, Tuple, Any
 
 import pandas as pd
 
+try:
+    from .streaming_events import streaming_emitter
+except ImportError:
+    from streaming_events import streaming_emitter
+
 logger = logging.getLogger(__name__)
 
 # Consistent color palette across charts (can be used by frontend)
@@ -23,19 +28,64 @@ def build_chart(
     Returns a dict with `data` and `config` keys for the frontend,
     or None if chart_type is 'table'.
     """
-    if df.empty:
-        return None
-
-    if chart_type == "table":
-        return None  # Frontend handles table rendering
-
+    # Emit start event
+    streaming_emitter.start_step(
+        step_number=3,
+        step_name="chart_build",
+        description="Building Chart"
+    )
+    
     try:
+        if df.empty:
+            streaming_emitter.complete_step(
+                step_number=3,
+                step_name="chart_build",
+                description="Building Chart",
+                details={"status": "skipped", "reason": "empty_dataframe"}
+            )
+            return None
+
+        if chart_type == "table":
+            streaming_emitter.complete_step(
+                step_number=3,
+                step_name="chart_build",
+                description="Building Chart",
+                details={"chart_type": "table", "status": "skipped", "reason": "table_format"}
+            )
+            return None  # Frontend handles table rendering
+
         chart_data, chart_config = _dispatch(df, chart_type, question)
         if chart_data is None or chart_config is None:
+            streaming_emitter.complete_step(
+                step_number=3,
+                step_name="chart_build",
+                description="Building Chart",
+                details={"status": "skipped", "reason": "dispatch_returned_none"}
+            )
             return None
+        
+        # Emit completion event
+        streaming_emitter.complete_step(
+            step_number=3,
+            step_name="chart_build",
+            description="Building Chart",
+            details={
+                "chart_type": chart_type,
+                "data_points": len(chart_data),
+                "status": "complete"
+            }
+        )
+        
         return {"data": chart_data, "config": chart_config}
     except Exception as e:
         logger.warning(f"Chart build failed ({chart_type}): {e}. Falling back to table.")
+        # Emit error event
+        streaming_emitter.error_step(
+            step_number=3,
+            step_name="chart_build",
+            description="Building Chart",
+            error_msg=str(e)
+        )
         return None
 
 

@@ -10,8 +10,10 @@ import numpy as np
 # Handle both relative and absolute imports
 try:
     from .csv_schema_analyzer import CSVSchemaAnalyzer
+    from .streaming_events import streaming_emitter
 except ImportError:
     from csv_schema_analyzer import CSVSchemaAnalyzer
+    from streaming_events import streaming_emitter
 
 logger = logging.getLogger(__name__)
 
@@ -287,34 +289,63 @@ class Database:
         Caps result at max_rows for the API; full count always returned.
         All non-JSON-serializable numpy types are sanitized.
         """
-        if not self._loaded:
-            raise RuntimeError("Database not loaded. Call load_data() first.")
+        # Emit start event
+        streaming_emitter.start_step(
+            step_number=2,
+            step_name="sql_execution",
+            description="Executing SQL Query"
+        )
+        
+        try:
+            if not self._loaded:
+                raise RuntimeError("Database not loaded. Call load_data() first.")
 
-        result = self.conn.execute(sql)
-        columns = [desc[0] for desc in result.description]
-        all_rows = result.fetchall()
-        total = len(all_rows)
+            result = self.conn.execute(sql)
+            columns = [desc[0] for desc in result.description]
+            all_rows = result.fetchall()
+            total = len(all_rows)
 
-        rows = [dict(zip(columns, row)) for row in all_rows[:max_rows]]
+            rows = [dict(zip(columns, row)) for row in all_rows[:max_rows]]
 
-        for row in rows:
-            for k, v in row.items():
-                if v is None:
-                    pass
-                elif isinstance(v, float) and v != v:      # NaN check
-                    row[k] = None
-                elif isinstance(v, np.integer):
-                    row[k] = int(v)
-                elif isinstance(v, np.floating):
-                    row[k] = None if np.isnan(v) else float(v)
-                elif isinstance(v, np.bool_):
-                    row[k] = bool(v)
-                elif isinstance(v, np.ndarray):
-                    row[k] = v.tolist()
-                elif hasattr(v, "item"):
-                    row[k] = v.item()
+            for row in rows:
+                for k, v in row.items():
+                    if v is None:
+                        pass
+                    elif isinstance(v, float) and v != v:      # NaN check
+                        row[k] = None
+                    elif isinstance(v, np.integer):
+                        row[k] = int(v)
+                    elif isinstance(v, np.floating):
+                        row[k] = None if np.isnan(v) else float(v)
+                    elif isinstance(v, np.bool_):
+                        row[k] = bool(v)
+                    elif isinstance(v, np.ndarray):
+                        row[k] = v.tolist()
+                    elif hasattr(v, "item"):
+                        row[k] = v.item()
 
-        return rows, columns, total
+            # Emit completion event
+            streaming_emitter.complete_step(
+                step_number=2,
+                step_name="sql_execution",
+                description="Executing SQL Query",
+                details={
+                    "rows": total,
+                    "columns": columns,
+                    "displayed_rows": min(total, max_rows)
+                }
+            )
+
+            return rows, columns, total
+        except Exception as e:
+            # Emit error event
+            streaming_emitter.error_step(
+                step_number=2,
+                step_name="sql_execution",
+                description="Executing SQL Query",
+                error_msg=str(e)
+            )
+            raise
 
     def execute_query_df(self, sql: str) -> pd.DataFrame:
         """Execute SQL and return a pandas DataFrame (used by chart builder)."""

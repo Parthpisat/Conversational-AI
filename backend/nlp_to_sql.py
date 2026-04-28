@@ -5,6 +5,7 @@ import time
 from typing import Optional
 from dotenv import load_dotenv
 from ollama_client import ollama_client
+from streaming_events import streaming_emitter
 
 load_dotenv()
 
@@ -21,7 +22,7 @@ FEW_SHOT_EXAMPLES = """
 === FEW-SHOT SQL EXAMPLES ===
 
 Q: What are the top 10 most ordered products?
-A:
+
 {
   "sql": "SELECT p.product_name, COUNT(*) AS order_count FROM order_products_all op JOIN products p ON op.product_id = p.product_id GROUP BY p.product_name ORDER BY order_count DESC LIMIT 10",
   "chart_type": "bar",
@@ -29,17 +30,15 @@ A:
 }
 
 Q: Which departments have the highest reorder rate?
-A:
+
 {
   "sql": "SELECT d.department, ROUND(AVG(op.reordered) * 100, 2) AS reorder_rate_pct FROM order_products_all op JOIN products p ON op.product_id = p.product_id JOIN departments d ON p.department_id = d.department_id GROUP BY d.department ORDER BY reorder_rate_pct DESC",
   "chart_type": "bar",
   "explanation": "Joins order_products → products → departments. AVG(reordered) on a 0/1 column gives the reorder rate. Multiplied by 100 for percentage."
 }
 
-Q: What is the reorder rate for each department, broken down by user?
-
 Q: What is the distribution of orders by hour of day?
-A:
+
 {
   "sql": "SELECT order_hour_of_day AS hour, COUNT(*) AS num_orders FROM orders GROUP BY hour ORDER BY hour",
   "chart_type": "line",
@@ -47,7 +46,7 @@ A:
 }
 
 Q: Show me the top 5 aisles by reorder rate and their average basket position
-A:
+
 {
   "sql": "SELECT a.aisle, ROUND(AVG(op.reordered) * 100, 2) AS reorder_rate_pct, ROUND(AVG(op.add_to_cart_order), 2) AS avg_basket_position FROM order_products_all op JOIN products p ON op.product_id = p.product_id JOIN aisles a ON p.aisle_id = a.aisle_id GROUP BY a.aisle ORDER BY reorder_rate_pct DESC LIMIT 5",
   "chart_type": "bar",
@@ -55,7 +54,7 @@ A:
 }
 
 Q: How many orders does the average user place?
-A:
+
 {
   "sql": "SELECT ROUND(AVG(order_count), 2) AS avg_orders_per_user FROM (SELECT user_id, COUNT(*) AS order_count FROM orders GROUP BY user_id)",
   "chart_type": "table",
@@ -63,7 +62,7 @@ A:
 }
 
 Q: What percentage of products in each department are organic?
-A:
+
 {
   "sql": "SELECT d.department, COUNT(*) AS total_products, SUM(CASE WHEN LOWER(p.product_name) LIKE '%organic%' THEN 1 ELSE 0 END) AS organic_count, ROUND(100.0 * SUM(CASE WHEN LOWER(p.product_name) LIKE '%organic%' THEN 1 ELSE 0 END) / COUNT(*), 2) AS organic_pct FROM products p JOIN departments d ON p.department_id = d.department_id GROUP BY d.department ORDER BY organic_pct DESC",
   "chart_type": "bar",
@@ -71,7 +70,7 @@ A:
 }
 
 Q: Show order volume by day of week
-A:
+
 {
   "sql": "SELECT CASE order_dow WHEN 0 THEN 'Saturday' WHEN 1 THEN 'Sunday' WHEN 2 THEN 'Monday' WHEN 3 THEN 'Tuesday' WHEN 4 THEN 'Wednesday' WHEN 5 THEN 'Thursday' WHEN 6 THEN 'Friday' END AS day_name, order_dow, COUNT(*) AS num_orders FROM orders GROUP BY order_dow, day_name ORDER BY order_dow",
   "chart_type": "bar",
@@ -79,7 +78,7 @@ A:
 }
 
 Q: What is the average days between orders, excluding first-time orders?
-A:
+
 {
   "sql": "SELECT ROUND(AVG(days_since_prior_order), 2) AS avg_days_between_orders, COUNT(*) AS order_count FROM orders WHERE days_since_prior_order IS NOT NULL",
   "chart_type": "table",
@@ -120,7 +119,15 @@ into correct DuckDB SQL queries.
 {CHART_GUIDE}
 
 === OUTPUT FORMAT ===
-Always respond with ONLY a valid JSON object — no markdown fences, no explanation outside the JSON:
+First, show your reasoning process using numbered steps. Then respond with ONLY a valid JSON object:
+
+Step-by-step reasoning:
+1. [Identify what tables and columns are needed]
+2. [Determine what joins are required]
+3. [Explain the aggregation/filtering logic]
+4. [Specify the chart type and why]
+
+Then provide the JSON (no markdown fences):
 {{
   "sql": "<DuckDB SQL query>",
   "chart_type": "<bar|line|pie|scatter|histogram|table>",
@@ -164,18 +171,23 @@ class NLToSQL:
     def _call_ollama(self, messages: list[dict]) -> dict:
         """
         Call the Ollama model and parse the JSON response.
-        Returns dict with keys: sql, chart_type, explanation
+        Returns dict with keys: sql, chart_type, explanation, reasoning_steps
         """
         # Prepare messages for Ollama - include system prompt and conversation
         ollama_messages = [
             {"role": "system", "content": self.system_prompt}
         ]
         
+        logger.info(f"📨 System prompt being sent to LLM (first 300 chars):\n{self.system_prompt[:300]}")
+        logger.info(f"📨 System prompt includes 'Step-by-step reasoning': {'Step-by-step reasoning' in self.system_prompt}")
+        
         # Add conversation history
         for msg in messages:
             role = msg.get("role") if isinstance(msg, dict) else "user"
             content = msg.get("content") if isinstance(msg, dict) else str(msg)
             ollama_messages.append({"role": role, "content": content})
+            if role == "user":
+                logger.info(f"👤 User message: {content[:100]}")
 
         # Retry logic with exponential backoff for temporary errors
         max_retries = 3
@@ -200,6 +212,14 @@ class NLToSQL:
                     continue
 
         raw_response = response.get("response", "")
+        
+        logger.info(f"🔍 RAW RESPONSE FROM LLM:")
+        logger.info(f"   Length: {len(raw_response)} chars")
+        logger.info(f"   First 500 chars:\n{raw_response[:500]}")
+        logger.info(f"   Last 500 chars:\n{raw_response[-500:]}")
+        
+        # Extract reasoning steps from the response
+        reasoning_steps = self._extract_reasoning_steps(raw_response)
         
         # Clean the response - SQLCoder might return HTML-like tags or special tokens
         cleaned_response = raw_response.strip()
@@ -229,19 +249,22 @@ class NLToSQL:
                         sql_code = sql_code[3:].strip()
                     result = {"sql": sql_code, "chart_type": "table", "explanation": ""}
                 else:
-                    # Assume it's raw SQL - clean any remaining artifacts
-                    sql_code = cleaned_response
-                    # Remove any leading/trailing non-SQL content
-                    if "SELECT" in sql_code.upper():
-                        # Extract from first SELECT onwards
-                        select_pos = sql_code.upper().find("SELECT")
-                        sql_code = sql_code[select_pos:]
-                    elif "WITH" in sql_code.upper():
-                        # Extract from first WITH onwards for CTEs
-                        with_pos = sql_code.upper().find("WITH")
-                        sql_code = sql_code[with_pos:]
-                    
-                    result = {"sql": sql_code.strip(), "chart_type": "table", "explanation": ""}
+                    # Try to find JSON object in the response
+                    json_start = cleaned_response.find("{")
+                    json_end = cleaned_response.rfind("}") + 1
+                    if json_start != -1 and json_end > json_start:
+                        json_part = cleaned_response[json_start:json_end]
+                        result = json.loads(json_part)
+                    else:
+                        # Assume it's raw SQL
+                        sql_code = cleaned_response
+                        if "SELECT" in sql_code.upper():
+                            select_pos = sql_code.upper().find("SELECT")
+                            sql_code = sql_code[select_pos:]
+                        elif "WITH" in sql_code.upper():
+                            with_pos = sql_code.upper().find("WITH")
+                            sql_code = sql_code[with_pos:]
+                        result = {"sql": sql_code.strip(), "chart_type": "table", "explanation": ""}
         
         except (json.JSONDecodeError, IndexError):
             # If JSON parsing fails, treat the cleaned response as SQL
@@ -259,6 +282,7 @@ class NLToSQL:
 
         result.setdefault("chart_type", "table")
         result.setdefault("explanation", "")
+        result["reasoning_steps"] = reasoning_steps  # Add reasoning steps
         
         # Clean the SQL to fix any formatting issues from the model
         if "sql" in result:
@@ -304,6 +328,86 @@ class NLToSQL:
         # Final trim
         return sql_code.strip()
 
+    def _extract_reasoning_steps(self, response: str) -> list[dict]:
+        """
+        Extract reasoning steps from the LLM response.
+        Looks for numbered steps (1., 2., 3., etc.) before the JSON.
+        Returns list of dicts: [{step: 1, description: "..."}, ...]
+        """
+        reasoning_steps = []
+        
+        # Find the JSON part (it starts with { and ends with })
+        json_start = response.find("{")
+        if json_start == -1:
+            logger.warning("❌ No JSON found in response for reasoning extraction")
+            logger.warning(f"Full response: {response[:500]}")
+            return reasoning_steps  # No JSON found, no reasoning to extract
+        
+        # Extract text before JSON
+        pre_json_text = response[:json_start].strip()
+        logger.info(f"📄 Full pre-JSON text for reasoning extraction:\n{pre_json_text}")
+        logger.info(f"📄 Pre-JSON text length: {len(pre_json_text)} chars")
+        
+        # Look for numbered steps
+        lines = pre_json_text.split('\n')
+        logger.info(f"📄 Total lines found: {len(lines)}")
+        
+        for line_num, line in enumerate(lines):
+            original_line = line
+            line = line.strip()
+            
+            if not line:
+                logger.debug(f"   Line {line_num}: [EMPTY]")
+                continue
+            
+            logger.debug(f"   Line {line_num}: '{line}'")
+            
+            # Check if line starts with a number followed by a period or parenthesis
+            if len(line) > 2 and line[0].isdigit():
+                logger.debug(f"      ✓ Line starts with digit: {line[0]}")
+                # Extract step number and description
+                for i, char in enumerate(line):
+                    if char in '.):' and i > 0 and line[:i].isdigit():
+                        try:
+                            step_num = int(line[:i])
+                            description = line[i+1:].strip()
+                            logger.debug(f"      ✓ Matched step {step_num}: {description[:50]}")
+                            if description:
+                                reasoning_steps.append({
+                                    "step": step_num,
+                                    "description": description
+                                })
+                                logger.info(f"✅ Added step {step_num}")
+                            break
+                        except ValueError as e:
+                            logger.debug(f"      ✗ ValueError parsing: {e}")
+            elif "step" in line.lower():
+                logger.debug(f"      ✓ Contains 'step' keyword")
+                # Handle "Step 1: ..." format
+                for i, char in enumerate(line):
+                    if char == ':' and i > 0:
+                        try:
+                            step_num = int(''.join(filter(str.isdigit, line[:i])))
+                            description = line[i+1:].strip()
+                            logger.debug(f"      ✓ Matched step {step_num}: {description[:50]}")
+                            if description:
+                                reasoning_steps.append({
+                                    "step": step_num,
+                                    "description": description
+                                })
+                                logger.info(f"✅ Added step {step_num}")
+                            break
+                        except ValueError as e:
+                            logger.debug(f"      ✗ ValueError parsing: {e}")
+        
+        logger.info(f"🎯 FINAL RESULT: Extracted {len(reasoning_steps)} reasoning steps")
+        if reasoning_steps:
+            logger.info(f"   Steps: {reasoning_steps}")
+        else:
+            logger.warning(f"❌ NO REASONING STEPS EXTRACTED")
+        
+        return reasoning_steps
+
     def translate(
         self,
         question: str,
@@ -315,14 +419,45 @@ class NLToSQL:
         conversation_history: list of {role: "user"|"assistant", content: str}
         This enables follow-up questions like "now filter that to organics".
         """
-        # Build message list: history + current question
-        messages = list(conversation_history or [])
-        messages.append({"role": "user", "content": question})
+        # Emit start event
+        streaming_emitter.start_step(
+            step_number=1,
+            step_name="nlp_translation",
+            description="Translating Natural Language to SQL"
+        )
+        
+        try:
+            # Build message list: history + current question
+            messages = list(conversation_history or [])
+            messages.append({"role": "user", "content": question})
 
-        logger.info(f"Translating: {question!r}")
-        result = self._call_ollama(messages)
-        logger.info(f"Generated SQL: {result['sql'][:200]}...")
-        return result
+            logger.info(f"Translating: {question!r}")
+            result = self._call_ollama(messages)
+            logger.info(f"Generated SQL: {result['sql'][:200]}...")
+            
+            # Emit completion event with SQL details
+            streaming_emitter.complete_step(
+                step_number=1,
+                step_name="nlp_translation",
+                description="Translating Natural Language to SQL",
+                details={
+                    "sql": result["sql"][:100] + "..." if len(result["sql"]) > 100 else result["sql"],
+                    "chart_type": result.get("chart_type", "table"),
+                    "explanation": result.get("explanation", ""),
+                    "reasoning_steps": len(result.get("reasoning_steps", []))
+                }
+            )
+            
+            return result
+        except Exception as e:
+            # Emit error event
+            streaming_emitter.error_step(
+                step_number=1,
+                step_name="nlp_translation",
+                description="Translating Natural Language to SQL",
+                error_msg=str(e)
+            )
+            raise
 
     def retry_with_error(
         self,
@@ -335,10 +470,41 @@ class NLToSQL:
         Self-correction: re-prompt Gemini with the error message so it
         can fix the SQL.
         """
-        logger.info(f"Retrying after error: {error_message[:100]}")
+        # Emit retry start event
+        streaming_emitter.start_step(
+            step_number=1,
+            step_name="nlp_translation",
+            description="Re-translating with Error Correction"
+        )
+        
+        try:
+            logger.info(f"Retrying after error: {error_message[:100]}")
 
-        retry_content = build_retry_prompt(original_question, failed_sql, error_message)
-        messages = list(conversation_history or [])
-        messages.append({"role": "user", "content": retry_content})
+            retry_content = build_retry_prompt(original_question, failed_sql, error_message)
+            messages = list(conversation_history or [])
+            messages.append({"role": "user", "content": retry_content})
 
-        return self._call_ollama(messages)
+            result = self._call_ollama(messages)
+            
+            # Emit completion event for retry
+            streaming_emitter.complete_step(
+                step_number=1,
+                step_name="nlp_translation",
+                description="Re-translating with Error Correction",
+                details={
+                    "sql": result["sql"][:100] + "..." if len(result["sql"]) > 100 else result["sql"],
+                    "chart_type": result.get("chart_type", "table"),
+                    "status": "recovered"
+                }
+            )
+            
+            return result
+        except Exception as e:
+            # Emit error event for retry
+            streaming_emitter.error_step(
+                step_number=1,
+                step_name="nlp_translation",
+                description="Re-translating with Error Correction",
+                error_msg=str(e)
+            )
+            raise
