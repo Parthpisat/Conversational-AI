@@ -42,9 +42,11 @@ Built on the Instacart Market Basket Analysis dataset (~33M+ records), Chatlytic
 ---
 
 ## 🎬 Demo
+![Alt Text](assets/chatlytics-output-1.jpeg)
 
+![Alt Text](assets/chatlytics-output-2.jpeg)
 
-
+![Alt Text](assets/chatlytics-output-3.jpeg)
  
 ## Setup
  
