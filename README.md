@@ -1,18 +1,49 @@
-# Conversational BI Agent — Instacart Dataset
- 
-A natural language Business Intelligence agent built on the Instacart Market Basket Analysis dataset (~3.4M orders, 206K users, 50K products across 6 interrelated CSV files). Ask questions in plain English and get back SQL queries, interactive charts, data tables, and AI-generated insights.
- 
+# 🚀 Chatlytics — Conversational BI with Real-Time Streaming
+
+Chatlytics is a real-time Conversational Business Intelligence platform that transforms natural language questions into SQL queries, executes them on large-scale datasets, and returns interactive charts, tables, and insights — with full transparency via a streaming execution pipeline.
+
+Built on the Instacart Market Basket Analysis dataset (~33M+ records), Chatlytics enables you to **chat with your data** and watch each step unfold live.
+
 ---
- 
-## Demo
- 
-```
-You:   "Which departments have the highest reorder rate?"
-Agent: Runs a 3-table JOIN → bar chart → "The produce department leads with a 67%
-        reorder rate, suggesting customers reliably return for fresh items weekly."
-```
- 
+
+## ✨ Key Features
+
+- 💬 **Chat-based Analytics**
+  - Ask questions in plain English
+  - Supports multi-turn conversations with context
+
+- ⚡ **Real-Time Streaming (SSE)**
+  - Live execution pipeline:
+    - NL → SQL Translation
+    - SQL Execution
+    - Chart Generation
+
+- 🧠 **AI-Powered SQL Generation**
+  - Uses LLM (Ollama - Llama 3.2)
+  - Schema-aware + few-shot prompting
+
+- 📊 **Dynamic Data Visualization**
+  - Auto-generated charts (Bar, Line, Pie)
+  - Recharts-compatible JSON rendering
+
+- 📋 **Structured Data Tables**
+  - Clean tabular output with row counts
+
+- 🧾 **SQL Transparency**
+  - View generated SQL
+  - Explanation + reasoning steps
+
+- 🗂️ **Schema Explorer**
+  - Explore tables, columns, and relationships
+
+- 🛠️ **Raw SQL Mode**
+  - Execute custom SQL queries directly
+
 ---
+
+## 🎬 Demo
+
+
 
  
 ## Setup
@@ -21,7 +52,8 @@ Agent: Runs a 3-table JOIN → bar chart → "The produce department leads with 
  
 - Python 3.10+
 - Node.js 18+ (for frontend)
-- A [Google Gemini API key](https://aistudio.google.com/app/apikey)
+- Ollama installed locally
+- Instacart dataset (6 CSV files)
  
 ### 1. Clone and install backend dependencies
  
@@ -43,23 +75,6 @@ project-root/
     ├── products.csv
     ├── aisles.csv
     └── departments.csv
-```
- 
-### 3. Set your Gemini API key
- 
-**Windows (CMD):**
-```cmd
-set GEMINI_API_KEY=your_key_here
-```
- 
-**Windows (PowerShell):**
-```powershell
-$env:GEMINI_API_KEY = "your_key_here"
-```
- 
-**macOS / Linux:**
-```bash
-export GEMINI_API_KEY=your_key_here
 ```
  
 ### 4. Start the backend
