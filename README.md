@@ -2,7 +2,7 @@
 
 Chatlytics is a real-time Conversational Business Intelligence platform that transforms natural language questions into SQL queries, executes them on large-scale datasets, and returns interactive charts, tables, and insights — with full transparency via a streaming execution pipeline.
 
-Built on the Instacart Market Basket Analysis dataset (~33M+ records), Chatlytics enables you to **chat with your data** and watch each step unfold live.
+Built on the Instacart Market Basket Analysis dataset (~3.4M+ records), Chatlytics enables you to **chat with your data** and watch each step unfold live.
 
 ---
 
